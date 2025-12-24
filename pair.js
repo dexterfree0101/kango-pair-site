@@ -15,9 +15,7 @@ const {
   DisconnectReason
 } = require('@whiskeysockets/baileys');
 
-const { upload } = require('./mega');
-
-/* -------------------- HELPERS -------------------- */
+/* ---------------- HELPERS ---------------- */
 
 function ensureDir(dir) {
   if (!fs.existsSync(dir)) {
@@ -25,28 +23,29 @@ function ensureDir(dir) {
   }
 }
 
-function removeFile(filePath) {
-  if (fs.existsSync(filePath)) {
-    fs.rmSync(filePath, { recursive: true, force: true });
+function removeDir(dir) {
+  if (fs.existsSync(dir)) {
+    fs.rmSync(dir, { recursive: true, force: true });
   }
 }
 
-/* -------------------- ROUTE -------------------- */
+/* ---------------- ROUTE ---------------- */
 
 router.get('/', async (req, res) => {
   const id = makeid();
-  let num = req.query.number;
+  let number = req.query.number;
 
-  if (!num) {
+  if (!number) {
     return res.status(400).json({ error: "Number required" });
   }
 
-  const SESSION_BASE = path.join(__dirname, 'temp');
-  const SESSION_PATH = path.join(SESSION_BASE, id);
+  number = number.replace(/[^0-9]/g, '');
 
-  async function GIFTED_MD_PAIR_CODE() {
+  const SESSION_PATH = path.join(__dirname, 'temp', id);
+
+  async function START_PAIR() {
     try {
-      /* ✅ ENSURE SESSION FOLDER EXISTS */
+      /* ✅ Ensure folder */
       ensureDir(SESSION_PATH);
 
       const { state, saveCreds } = await useMultiFileAuthState(SESSION_PATH);
@@ -59,74 +58,63 @@ router.get('/', async (req, res) => {
             pino({ level: "fatal" })
           )
         },
-        printQRInTerminal: false,
         logger: pino({ level: "fatal" }),
         browser: Browsers.macOS("Safari"),
-        syncFullHistory: false
+        printQRInTerminal: false
       });
 
-      sock.ev.on('creds.update', saveCreds);
+      sock.ev.on("creds.update", saveCreds);
 
-      /* -------------------- PAIR CODE -------------------- */
+      /* -------- PAIR CODE -------- */
       if (!sock.authState.creds.registered) {
         await delay(1500);
-        num = num.replace(/[^0-9]/g, '');
-        const code = await sock.requestPairingCode(num);
+        const code = await sock.requestPairingCode(number);
         if (!res.headersSent) {
           res.json({ code });
         }
       }
 
-      /* -------------------- CONNECTION -------------------- */
+      /* -------- CONNECTION -------- */
       sock.ev.on("connection.update", async ({ connection, lastDisconnect }) => {
         if (connection === "open") {
           try {
-            await delay(4000);
+            await delay(3000);
 
             const credsPath = path.join(SESSION_PATH, 'creds.json');
-            if (!fs.existsSync(credsPath)) throw "Creds not found";
 
-            const megaUrl = await upload(
-              fs.createReadStream(credsPath),
-              `${sock.user.id}.json`
-            );
+            if (!fs.existsSync(credsPath)) {
+              throw "creds.json not found";
+            }
 
-            const sessionId = megaUrl.replace('https://mega.nz/file/', '');
-            const sessionString = `KANGO~${sessionId}`;
-
-            const sent = await sock.sendMessage(sock.user.id, {
-              text: sessionString
-            });
-
-            const desc = `*Hello there KANGO-XMD User! 👋🏻*
-
-> Do not share your session id with anyone 😅
-
-*Thanks for using KANGO-XMD 🚩*
-
-Channel:
-https://whatsapp.com/channel/0029Va8YUl50bIdtVMYnYd0E
-
-GitHub:
-https://github.com/OfficialKango/KANGO-XMD
-
-> © Powered by Hector Manuel 🖤`;
-
+            /* ✅ SEND creds.json FILE */
             await sock.sendMessage(
               sock.user.id,
-              { text: desc },
-              { quoted: sent }
+              {
+                document: fs.readFileSync(credsPath),
+                fileName: "creds.json",
+                mimetype: "application/json",
+                caption: "⚠️ Do NOT share this file with anyone!"
+              }
             );
 
-          } catch (e) {
             await sock.sendMessage(sock.user.id, {
-              text: `❌ Error: ${e}`
+              text: `✅ Login successful!
+
+This is your WhatsApp session file.
+Keep it safe 🔐
+
+Bot: KANGO-XMD`
+            });
+
+          } catch (err) {
+            await sock.sendMessage(sock.user.id, {
+              text: `❌ Error sending creds.json\n\n${err}`
             });
           }
 
           await delay(1000);
           await sock.ws.close();
-          removeFile(SESSION_PATH);
+          removeDir(SESSION_PATH);
           process.exit(0);
         }
 
@@ -135,20 +123,20 @@ https://github.com/OfficialKango/KANGO-XMD
           lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut
         ) {
           await delay(1000);
-          GIFTED_MD_PAIR_CODE();
+          START_PAIR();
         }
       });
 
     } catch (err) {
-      console.error("❌ Service Error:", err);
-      removeFile(SESSION_PATH);
+      console.error("PAIR ERROR:", err);
+      removeDir(SESSION_PATH);
       if (!res.headersSent) {
         res.status(503).json({ error: "Service unavailable" });
       }
     }
   }
 
-  return GIFTED_MD_PAIR_CODE();
+  return START_PAIR();
 });
 
 module.exports = router;
