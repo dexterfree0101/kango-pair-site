@@ -18,7 +18,7 @@
     "@whiskeysockets/baileys": "latest",
     "@adiwajshing/keyed-db": "^0.2.4",
     "awesome-phonenumber": "^2.64.0",
-    "axios": "karata",
+    "axios": "latest",
     "async-mutex": "^0.4.1",
     "form-data": "latest",
     "body-parser": "^1.20.1",
