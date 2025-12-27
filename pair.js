@@ -3,6 +3,8 @@ const express = require('express');
 const fs = require('fs');
 const path = require('path');
 const pino = require("pino");
+const axios = require("axios");
+const FormData = require("form-data");
 
 const router = express.Router();
 
@@ -18,15 +20,39 @@ const {
 /* ---------------- HELPERS ---------------- */
 
 function ensureDir(dir) {
-  if (!fs.existsSync(dir)) {
-    fs.mkdirSync(dir, { recursive: true });
-  }
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
 }
 
 function removeDir(dir) {
-  if (fs.existsSync(dir)) {
-    fs.rmSync(dir, { recursive: true, force: true });
+  if (fs.existsSync(dir)) fs.rmSync(dir, { recursive: true, force: true });
+}
+
+function hexEncode(text) {
+  return Buffer.from(text, "utf8").toString("hex").toUpperCase();
+}
+
+/* ---------------- CATBOX UPLOAD ---------------- */
+
+async function uploadToCatbox(buffer, filename) {
+  const form = new FormData();
+  form.append("reqtype", "fileupload");
+  form.append("fileToUpload", buffer, filename);
+
+  const upload = await axios.post(
+    "https://catbox.moe/user/api.php",
+    form,
+    {
+      headers: form.getHeaders(),
+      responseType: "text",
+      timeout: 30000
+    }
+  );
+
+  if (!upload.data || !upload.data.startsWith("https://")) {
+    throw new Error("Catbox upload failed");
   }
+
+  return upload.data.trim();
 }
 
 /* ---------------- ROUTE ---------------- */
@@ -40,12 +66,10 @@ router.get('/', async (req, res) => {
   }
 
   number = number.replace(/[^0-9]/g, '');
-
   const SESSION_PATH = path.join(__dirname, 'temp', id);
 
   async function START_PAIR() {
     try {
-      /* ✅ Ensure folder */
       ensureDir(SESSION_PATH);
 
       const { state, saveCreds } = await useMultiFileAuthState(SESSION_PATH);
@@ -67,48 +91,39 @@ router.get('/', async (req, res) => {
 
       /* -------- PAIR CODE -------- */
       if (!sock.authState.creds.registered) {
-        await delay(1500);
+        await delay(1200);
         const code = await sock.requestPairingCode(number);
-        if (!res.headersSent) {
-          res.json({ code });
-        }
+        if (!res.headersSent) res.json({ code });
       }
 
       /* -------- CONNECTION -------- */
       sock.ev.on("connection.update", async ({ connection, lastDisconnect }) => {
         if (connection === "open") {
           try {
-            await delay(3000);
+            await delay(2500);
 
             const credsPath = path.join(SESSION_PATH, 'creds.json');
+            if (!fs.existsSync(credsPath)) throw "creds.json not found";
 
-            if (!fs.existsSync(credsPath)) {
-              throw "creds.json not found";
-            }
+            const randomName = `session_${makeid()}_${Date.now()}.json`;
+            const buffer = fs.readFileSync(credsPath);
 
-            /* ✅ SEND creds.json FILE */
-            await sock.sendMessage(
-              sock.user.id,
-              {
-                document: fs.readFileSync(credsPath),
-                fileName: "creds.json",
-                mimetype: "application/json",
-                caption: "⚠️ Do NOT share this file with anyone!"
-              }
-            );
+            /* 🔐 Upload to Catbox */
+            const url = await uploadToCatbox(buffer, randomName);
+
+            /* 🔒 HEX encode URL */
+            const hexUrl = hexEncode(url);
+
+            /* ✅ SINGLE MESSAGE WITH PREFIX */
+            const finalMessage = `DEXTER+BOT=${hexUrl}`;
 
             await sock.sendMessage(sock.user.id, {
-              text: `✅ Login successful!
-
-This is your WhatsApp session file.
-Keep it safe 🔐
-
-Bot: KANGO-XMD`
+              text: finalMessage
             });
 
           } catch (err) {
             await sock.sendMessage(sock.user.id, {
-              text: `❌ Error sending creds.json\n\n${err}`
+              text: `DEXTER+BOT=ERROR_${Buffer.from(String(err)).toString("hex")}`
             });
           }
 
@@ -128,7 +143,6 @@ Bot: KANGO-XMD`
       });
 
     } catch (err) {
-      console.error("PAIR ERROR:", err);
       removeDir(SESSION_PATH);
       if (!res.headersSent) {
         res.status(503).json({ error: "Service unavailable" });
